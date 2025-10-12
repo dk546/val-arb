@@ -1,0 +1,22 @@
+# venv
+.venv/
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+# notebooks
+.ipynb_checkpoints/
+# OS cruft
+.DS_Store
+Thumbs.db
+# vscode
+.vscode/*
+!.vscode/settings.json
+# env / secrets
+.env
+# data & cache
+data/*
+!data/.gitkeep
+.cache/
