@@ -1,0 +1,9 @@
+services:
+- type: web
+  name: val-arb-dcf
+  env: python
+  plan: free
+  buildCommand: pip install -r requirements.txt
+  startCommand: >-
+    streamlit run src/streamlit_app/home.py --server.address 0.0.0.0 --server.port $PORT
+  autoDeploy: true
