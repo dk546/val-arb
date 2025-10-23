@@ -1,3 +1,12 @@
+import os
+import sys
+
+# Minimal defensive PYTHONPATH fallback so `from app.* import ...` works when
+# running via the VS Code debugger or Streamlit launcher without PYTHONPATH set.
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -50,9 +59,10 @@ if run:
     with st.spinner("Fetching data & computing..."):
         # Beta & expected return
         beta, alpha = compute_beta(ticker, market=market, lookback_years=lookback, freq=freq)
-        if np.isnan(beta):
+        if beta is None or (isinstance(beta, float) and np.isnan(beta)):
             st.warning("Not enough return history to estimate beta. Using beta=1.0 as placeholder.")
             beta = 1.0
+
 
         erp = erp_manual if use_manual_erp else None
         re = expected_return_capm(beta, rf=rf, erp=erp, market=market, lookback_years=lookback, freq=freq)
@@ -61,6 +71,17 @@ if run:
         fundamentals = fetch_fundamentals(ticker)
         shares = fundamentals.get("shares_outstanding", None)
         net_debt = fundamentals.get("net_debt", 0.0)
+
+        # warn if fundamentals are incomplete
+        missing_fundamentals = []
+        if shares is None:
+            missing_fundamentals.append("shares_outstanding")
+        if net_debt is None:
+            missing_fundamentals.append("net_debt")
+        if fundamentals.get("revenue_last_fy") is None:
+            missing_fundamentals.append("revenue_last_fy")
+        if len(missing_fundamentals) > 0:
+            st.warning(f"Missing fundamentals: {', '.join(missing_fundamentals)} — defaults/imputations will be used.")
 
         st.subheader("Rates & Structure")
         col = st.columns(4)
@@ -96,10 +117,31 @@ if run:
         cols2[2].metric("Per Share", f"${ps:,.2f}" if not np.isnan(ps) else "N/A")
 
         st.subheader("Sensitivity (EV)")
-        wacc_vals = np.round(np.linspace(max(0.03, w-0.03), w+0.03, 5), 4)
-        g_vals = np.round(np.linspace(max(0.0, g-0.01), g+0.01, 5), 4)
-        sens = sensitivity_table(fcff_df["FCFF"].tolist(), wacc_vals, g_vals)
-        st.dataframe(sens.style.format("{:,.0f}"))
+        # build ranges but allow NaN/fallbacks — ensure the table renders
+        try:
+            w_low = max(0.03, (w - 0.03) if (w is not None and not np.isnan(w)) else 0.06)
+        except Exception:
+            w_low = 0.03
+        try:
+            w_high = (w + 0.03) if (w is not None and not np.isnan(w)) else 0.09
+        except Exception:
+            w_high = 0.09
+
+        try:
+            g_low = max(0.0, (g - 0.01) if (g is not None and not np.isnan(g)) else 0.0)
+        except Exception:
+            g_low = 0.0
+        try:
+            g_high = (g + 0.01) if (g is not None and not np.isnan(g)) else 0.03
+        except Exception:
+            g_high = 0.03
+
+        wacc_vals = np.round(np.linspace(w_low, w_high, 5), 4)
+        g_vals = np.round(np.linspace(g_low, g_high, 5), 4)
+        # sensitivity_table is resilient to NaNs in inputs; ensure we coerce to lists
+        sens = sensitivity_table(fcff_df["FCFF"].tolist(), wacc_vals.tolist(), g_vals.tolist())
+        # show table even if some values are NaN
+        st.dataframe(sens.fillna("N/A").style.format("{:,.0f}"))
 
         st.caption("Note: Data via yfinance; fundamentals coverage can vary. This is an educational sandbox, not investment advice.")
 else:

@@ -1,84 +1,149 @@
 
+import logging
+from typing import Dict, Optional, Any
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
 import yfinance as yf
 
-def fetch_price_history(ticker: str, start: Optional[str] = None, end: Optional[str] = None, interval: str = "1d") -> pd.DataFrame:
+logger = logging.getLogger(__name__)
+
+def fetch_price_history(
+    ticker: str, start: Optional[str] = None, end: Optional[str] = None, interval: str = "1d"
+) -> pd.DataFrame:
     """Download price history for a ticker using yfinance.
+
     Returns a DataFrame with Date index and columns: Open, High, Low, Close, Adj Close, Volume.
+    If no data is returned by yfinance, an empty DataFrame is returned and a warning is logged.
     """
     if end is None:
         end = datetime.today().strftime("%Y-%m-%d")
     if start is None:
-        start = (datetime.today() - timedelta(days=365*10)).strftime("%Y-%m-%d")
+        start = (datetime.today() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+
     df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False)
+    if isinstance(df, pd.DataFrame) and df.empty:
+        logger.warning("fetch_price_history: no price history returned for %s", ticker)
+        # return an empty dataframe with expected columns where possible
+        cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+        return pd.DataFrame(columns=cols)
+
     if isinstance(df.columns, pd.MultiIndex):
         # In case yfinance returns multi-index columns for multiple tickers
-        df = df.xs(ticker, axis=1, level=1, drop_level=True)
+        try:
+            df = df.xs(ticker, axis=1, level=1, drop_level=True)
+        except Exception:
+            # fallback: return empty dataframe and log
+            logger.warning("fetch_price_history: multi-index unpack failed for %s", ticker)
+            return pd.DataFrame()
+
     df = df.rename_axis("Date").sort_index()
     return df
 
 def fetch_returns(ticker: str, lookback_years: int = 5, freq: str = "M") -> pd.Series:
-    """Compute periodic returns for ticker over lookback window. freq: 'D', 'W', 'M' (uses resampled Adj Close)."""
+    """Compute periodic returns for ticker over lookback window.
+
+    freq: 'D', 'W', 'M' (uses resampled Adj Close).
+    Returns an empty pd.Series if no price data is available.
+    """
     end = datetime.today()
-    start = end - timedelta(days=365*lookback_years + 30)
+    start = end - timedelta(days=365 * lookback_years + 30)
     px = fetch_price_history(ticker, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
-    if px.empty:
+    if px is None or px.empty:
+        logger.warning("fetch_returns: no price history available for %s (lookback=%s years)", ticker, lookback_years)
         return pd.Series(dtype=float, name=ticker)
-    adj = px.get("Adj Close", px["Close"]).dropna()
+
+    # prefer 'Adj Close' when present, otherwise fallback to 'Close'
+    adj = px.get("Adj Close") if "Adj Close" in px.columns else px.get("Close")
+    if adj is None or adj.dropna().empty:
+        logger.warning("fetch_returns: no adjusted/close prices for %s", ticker)
+        return pd.Series(dtype=float, name=ticker)
+
     if freq.upper() == "D":
-        series = adj
+        series = adj.dropna()
     else:
-        series = adj.resample(freq.upper()).last()
+        series = adj.resample(freq.upper()).last().dropna()
+
     rets = series.pct_change().dropna()
     rets.name = ticker
     return rets
 
-def fetch_fundamentals(ticker: str) -> dict:
-    """Fetch basic fundamentals via yfinance: shares outstanding, net debt, tax rate (approx), last FY revenue, EBIT margin.
-    Note: yfinance coverage varies; functions handle missing keys gracefully.
+def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
+    """Fetch basic fundamentals via yfinance.
+
+    Returns a dict with keys: shares_outstanding, net_debt, revenue_last_fy,
+    ebit_margin_last_fy, tax_rate_est, info. All lookups are guarded and
+    missing values are returned as None. Warnings are logged when data is
+    absent or incomplete.
     """
     t = yf.Ticker(ticker)
-    info = t.info if hasattr(t, "info") else {}
+    info: Dict[str, Any] = getattr(t, "info", {}) or {}
     shares_out = info.get("sharesOutstanding")
+
     # Balance sheet: totalDebt, cash
-    bs = t.balance_sheet
-    cash = None
-    debt = None
+    bs = getattr(t, "balance_sheet", None)
+    cash: Optional[float] = None
+    debt: Optional[float] = None
+
     if isinstance(bs, pd.DataFrame) and not bs.empty:
-        # yfinance columns are periods; rows are line items
-        cash = bs.loc[bs.index.str.lower().str.contains("cash"), :].sum().max()
-        short_debt = bs.loc[bs.index.str.lower().str.contains("short"), :].sum().max() if "short" in "".join(bs.index.str.lower()) else None
-        long_debt = bs.loc[bs.index.str.lower().str.contains("long"), :].sum().max() if "long" in "".join(bs.index.str.lower()) else None
-        if pd.notna(short_debt) or pd.notna(long_debt):
-            debt = (0 if pd.isna(short_debt) else short_debt) + (0 if pd.isna(long_debt) else long_debt)
+        # normalize index to strings for safe matching
+        try:
+            idx = bs.index.to_series().astype(str).str.lower()
+            # look for rows containing 'cash'
+            cash_rows = bs.loc[idx.str.contains("cash"), :]
+            if not cash_rows.empty:
+                cash = float(cash_rows.sum(axis=1).max())
+
+            # short/long debt heuristics
+            short_rows = bs.loc[idx.str.contains("short"), :] if idx.str.contains("short").any() else pd.DataFrame()
+            long_rows = bs.loc[idx.str.contains("long"), :] if idx.str.contains("long").any() else pd.DataFrame()
+            short_debt = float(short_rows.sum(axis=1).max()) if not short_rows.empty else None
+            long_debt = float(long_rows.sum(axis=1).max()) if not long_rows.empty else None
+            if short_debt is not None or long_debt is not None:
+                debt = (0.0 if short_debt is None else short_debt) + (0.0 if long_debt is None else long_debt)
+        except Exception:
+            logger.debug("fetch_fundamentals: balance_sheet parsing failed for %s", ticker)
+
     if debt is None:
         debt = info.get("totalDebt")
     if cash is None:
         cash = info.get("totalCash")
-    net_debt = None
+
+    net_debt: Optional[float] = None
     if debt is not None and cash is not None:
-        net_debt = float(debt) - float(cash)
+        try:
+            net_debt = float(debt) - float(cash)
+        except Exception:
+            net_debt = None
 
     # Income statement for revenue and EBIT margin
-    fin = t.financials
-    revenue = None
-    ebit = None
+    fin = getattr(t, "financials", None)
+    revenue: Optional[float] = None
+    ebit: Optional[float] = None
     if isinstance(fin, pd.DataFrame) and not fin.empty:
-        if any(fin.index.str.lower().str.contains("total revenue")):
-            revenue = fin.loc[fin.index.str.lower().str.contains("total revenue")].iloc[0, 0]
-        if any(fin.index.str.lower().str.contains("ebit")):
-            ebit = fin.loc[fin.index.str.lower().str.contains("ebit")].iloc[0, 0]
+        try:
+            fidx = fin.index.to_series().astype(str).str.lower()
+            if fidx.str.contains("total revenue").any():
+                revenue = fin.loc[fidx.str.contains("total revenue")].iloc[0, 0]
+            if fidx.str.contains("ebit").any():
+                ebit = fin.loc[fidx.str.contains("ebit")].iloc[0, 0]
+        except Exception:
+            logger.debug("fetch_fundamentals: financials parsing failed for %s", ticker)
+
     if revenue is None:
         revenue = info.get("totalRevenue")
     if ebit is None:
         # fallback: operating income
-        if isinstance(fin, pd.DataFrame) and not fin.empty and any(fin.index.str.lower().str.contains("operating income")):
-            ebit = fin.loc[fin.index.str.lower().str.contains("operating income")].iloc[0, 0]
+        try:
+            if isinstance(fin, pd.DataFrame) and not fin.empty:
+                fidx = fin.index.to_series().astype(str).str.lower()
+                if fidx.str.contains("operating income").any():
+                    ebit = fin.loc[fidx.str.contains("operating income")].iloc[0, 0]
+        except Exception:
+            pass
 
-    ebit_margin = None
+    ebit_margin: Optional[float] = None
     if ebit is not None and revenue:
         try:
             ebit_margin = float(ebit) / float(revenue)
@@ -86,19 +151,24 @@ def fetch_fundamentals(ticker: str) -> dict:
             ebit_margin = None
 
     # Tax rate approximation: last year's income tax / EBT
-    tax_rate = None
+    tax_rate: Optional[float] = None
     if isinstance(fin, pd.DataFrame) and not fin.empty:
-        tax_row = fin.loc[fin.index.str.lower().str.contains("income tax"), :]
-        ebt_row = fin.loc[fin.index.str.lower().str.contains("pretax"), :]
-        if not tax_row.empty and not ebt_row.empty:
-            tax = tax_row.iloc[0, 0]
-            ebt = ebt_row.iloc[0, 0]
-            if ebt and ebt != 0:
-                tax_rate = max(0.0, min(0.35, float(tax) / float(ebt)))  # clip to [0, 35%]
+        try:
+            fidx = fin.index.to_series().astype(str).str.lower()
+            tax_row = fin.loc[fidx.str.contains("income tax"), :]
+            ebt_row = fin.loc[fidx.str.contains("pretax"), :]
+            if not tax_row.empty and not ebt_row.empty:
+                tax = tax_row.iloc[0, 0]
+                ebt = ebt_row.iloc[0, 0]
+                if ebt and ebt != 0:
+                    tax_rate = max(0.0, min(0.35, float(tax) / float(ebt)))  # clip to [0, 35%]
+        except Exception:
+            logger.debug("fetch_fundamentals: tax rate parsing failed for %s", ticker)
+
     if tax_rate is None:
         tax_rate = 0.21  # US default
 
-    return {
+    result: Dict[str, Any] = {
         "shares_outstanding": shares_out,
         "net_debt": net_debt,
         "revenue_last_fy": revenue,
@@ -106,3 +176,9 @@ def fetch_fundamentals(ticker: str) -> dict:
         "tax_rate_est": tax_rate,
         "info": info,
     }
+
+    # Log if most key fields are missing
+    if shares_out is None and net_debt is None and revenue is None:
+        logger.warning("fetch_fundamentals: limited fundamentals for %s; results may be incomplete", ticker)
+
+    return result
