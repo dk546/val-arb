@@ -5,9 +5,16 @@ from typing import Dict, Optional, Any
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+    logger.warning(
+        "yfinance not available: network fetch functions will return empty results. Install with 'pip install yfinance'"
+    )
 
 def fetch_price_history(
     ticker: str, start: Optional[str] = None, end: Optional[str] = None, interval: str = "1d"
@@ -21,6 +28,11 @@ def fetch_price_history(
         end = datetime.today().strftime("%Y-%m-%d")
     if start is None:
         start = (datetime.today() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+
+    if yf is None:
+        logger.warning("fetch_price_history: yfinance not installed; returning empty DataFrame for %s", ticker)
+        cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+        return pd.DataFrame(columns=cols)
 
     df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False)
     if isinstance(df, pd.DataFrame) and df.empty:
@@ -77,6 +89,17 @@ def fetch_fundamentals(ticker: str) -> Dict[str, Any]:
     missing values are returned as None. Warnings are logged when data is
     absent or incomplete.
     """
+    if yf is None:
+        logger.warning("fetch_fundamentals: yfinance not installed; returning empty fundamentals for %s", ticker)
+        return {
+            "shares_outstanding": None,
+            "net_debt": None,
+            "revenue_last_fy": None,
+            "ebit_margin_last_fy": None,
+            "tax_rate_est": 0.21,
+            "info": {},
+        }
+
     t = yf.Ticker(ticker)
     info: Dict[str, Any] = getattr(t, "info", {}) or {}
     shares_out = info.get("sharesOutstanding")

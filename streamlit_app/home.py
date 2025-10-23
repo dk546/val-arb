@@ -11,6 +11,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from app.data import fetch_returns, fetch_fundamentals
+import app.data as app_data
 from app.rates import compute_beta, expected_return_capm, wacc
 from app.fcff import ForecastInputs, project_drivers
 from app.dcf import enterprise_value, equity_value, per_share, sensitivity_table
@@ -59,7 +60,9 @@ if run:
     with st.spinner("Fetching data & computing..."):
         # Beta & expected return
         beta, alpha = compute_beta(ticker, market=market, lookback_years=lookback, freq=freq)
+        beta_fallback = False
         if beta is None or (isinstance(beta, float) and np.isnan(beta)):
+            beta_fallback = True
             st.warning("Not enough return history to estimate beta. Using beta=1.0 as placeholder.")
             beta = 1.0
 
@@ -82,6 +85,22 @@ if run:
             missing_fundamentals.append("revenue_last_fy")
         if len(missing_fundamentals) > 0:
             st.warning(f"Missing fundamentals: {', '.join(missing_fundamentals)} — defaults/imputations will be used.")
+
+        # Show which defaults/imputations are being used
+        defaults_used = []
+        if getattr(app_data, "yf", None) is None:
+            defaults_used.append("yfinance not installed — live price/fundamentals disabled")
+        if beta_fallback:
+            defaults_used.append("beta fallback -> 1.0 used for CAPM")
+        if "shares_outstanding" in missing_fundamentals:
+            defaults_used.append("shares_outstanding missing -> per-share N/A unless provided")
+        if "net_debt" in missing_fundamentals:
+            defaults_used.append("net_debt missing -> assumed 0.0")
+        if "revenue_last_fy" in missing_fundamentals:
+            defaults_used.append(f"revenue_last_fy missing -> using sidebar revenue_start = {revenue_start:,.0f}")
+
+        if defaults_used:
+            st.info("Defaults / imputations in effect:\n- " + "\n- ".join(defaults_used))
 
         st.subheader("Rates & Structure")
         col = st.columns(4)
