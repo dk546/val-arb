@@ -2,6 +2,10 @@
 
 A practical valuation tool that fetches data (Yahoo Finance), estimates discount rates (CAPM / beta regression), builds FCFF-based DCFs, and shows implied multiples — all in a friendly Streamlit UI.
 
+##  Live Demo
+ **[View on Render](https://val-arb-dcf.onrender.com)**
+
+
 ## Features (v0)
 - Ticker input → data fetch via `yfinance`
 - FCFF & WACC computation
