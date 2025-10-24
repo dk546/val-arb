@@ -16,6 +16,7 @@ Thumbs.db
 !.vscode/settings.json
 # env / secrets
 .env
+venv/
 # data & cache
 data/*
 !data/.gitkeep
